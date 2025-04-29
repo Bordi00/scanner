@@ -1,6 +1,9 @@
 import argparse
 import codecs
 import ipaddress
+import random
+
+from IPython.terminal.ipapp import flags
 from scapy.all import *
 from scapy.layers.inet import IP, TCP, UDP, ICMP
 import re
@@ -8,6 +11,8 @@ import json
 from loguru import logger
 
 SCAN_TYPES = ["tcp", "udp", "syn", "xmas", "ack", "null", "fin"]
+FILTERED_CODES = [1, 2, 3, 9, 10, 13]
+
 
 def get_payloads():
     entries = []
@@ -69,125 +74,187 @@ def host_discovery(network: ipaddress.IPv4Network | ipaddress.IPv6Network) -> li
 
 
 class Scanner:
-    def __init__(self, args):
-        conf.iface = args.interface
-        targets = args.target.split(",")
+    def __init__(self, params):
+        conf.iface = params.interface
+        targets = params.target.split(",")
         self.targets = set()
         for target in targets:
             if "/" in target:  # 172.10.2.0/24
                 try:
                     self.targets.add(ipaddress.ip_network(target, strict=False))
                 except ValueError:
-                    print(f"Invalid network address: {args.target}")
+                    print(f"Invalid network address: {params.target}")
                     exit(1)
             else:
                 try:
                     self.targets.add(ipaddress.ip_address(target))
                 except ValueError:
-                    print(f"Invalid IP address: {args.target}")
+                    print(f"Invalid IP address: {params.target}")
                     exit(1)
 
         self.ports = set()
-        for port in args.port.split(","):
+        for port in params.port.split(","):
             if "-" in port:
                 start_port, end_port = port.split("-")
                 self.ports.update(range(int(start_port), int(end_port) + 1))
             else:
                 self.ports.add(int(port))
 
-        self.verbose = args.verbose
-        self.randomize = args.randomize
-        self.delay = args.delay
-        self.open_ports = dict()
+        self.verbose = params.verbose
+        self.randomize = params.randomize
+        self.delay = params.delay
+        self.open_ports = {}
         self.payloads = get_payloads()
+        self.mode = params.mode
+        match self.mode:
+            case "noisy":
+                self.inter = None
+            case "sneaky":
+                self.inter = (1.0, 3.0)
+            case "stealth":
+                self.inter = (3.0, 10.0)
 
         if not self.randomize:
-            self.scan_type = args.scan_type
+            self.scan_type = params.scan_type
 
-    def _scan_port(self, target: str, port: int):
+    def _scan_port(self, target: str | list, port: int):
         scan_type = random.choice(SCAN_TYPES) if self.randomize else self.scan_type
-        delay = random.uniform(0.0, 1.0) if self.randomize else self.delay
-        if delay is not None:
-            time.sleep(delay)
+        if self.inter and self.randomize:
+            self.delay = random.uniform(self.inter[0], self.inter[1])
 
         match scan_type:
             case "tcp":
-                p = IP(dst=target) / TCP(dport=port, flags="S")
-                request, responses = sr(p, timeout=1, verbose=False)
-                for response in responses:
-                    if response and response.haslayer(TCP) and response[TCP].flags == 0x12:  # SYN-ACK
-                        _, response = sr(IP(dst=target) / TCP(dport=port, flags="A"), timeout=1, verbose=False)
-                        if response and response.haslayer(TCP) and response[TCP].flags == 0x10:  # ACK
-                            sr(IP(dst=target) / TCP(dport=port, flags="R"), timeout=1, verbose=False)
-                            self.open_ports[target] = self.open_ports.get(target, []).append(port)
-                            logger.info(f"{target}:{port} is open")
-
+                self.tcp_scan(target, [port])
             case "udp":
-                payloads = []
-                for bs in self.payloads:
-                    payloads = bs["payloads"] if port in bs.get("ports", []) else []
-                    break
-                p = [IP(dst=target) / UDP(dport=port) / Raw(load=pl) for pl in payloads] if payloads else IP(dst=target) / UDP(dport=port)
-                for _ in range(2):
-                    _, responses = sr(p, timeout=1, verbose=False)
-                    for _ in responses if responses else []:
-                        self.open_ports[target] = self.open_ports.get(target, []).append(port)
-                        break
+                self.udp_scan(target, [port])
             case "syn":
-                _, responses = sr(IP(dst=target) / TCP(dport=port, flags="S"), timeout=1, verbose=False)
-                for response in responses:
-                    if response and response.haslayer(TCP) and response[TCP].flags == 0x12:
-                        sr(IP(dst=target) / TCP(dport=port, flags="R"), timeout=1, verbose=False)
-                        self.open_ports[target] = self.open_ports.get(target, []).append(port)
-                        logger.info(f"{target}:{port} is open")
+                self.syn_scan(target, [port])
             case "xmas":
-                for i in range(2):
-                    _, responses = sr(IP(dst=target) / TCP(dport=port, flags="FPU"), timeout=1, verbose=False)
-                    for response in responses if responses else []:
-                        if i == 1:
-                            self.open_ports[target] = self.open_ports.get(target, []).append(port)
-                            logger.info(f"{target}:{port} is open")
-
-                    if i != 1 and responses:
-                        break
+                self.exotic_scan(target, [port], mode="x")
             case "ack":
                 # TODO: implement the logic for ACK scan
                 # response = sr(IP(dst=target) / TCP(dport=port, flags="A"), timeout=1, verbose=False)
                 pass
             case "null":
-                for i in range(2):
-                    _, responses = sr(IP(dst=target) / TCP(dport=port, flags=""), timeout=1, verbose=False)
-                    for response in responses:
-                        if i == 1:
-                            self.open_ports[target] = self.open_ports.get(target, []).append(port)
-                            logger.info(f"{target}:{port} is open")
-                    if i != 1 and responses:
-                        break
+                self.exotic_scan(target, [port], mode="n")
             case "fin":
-                for i in range(2):
-                    _, responses = sr(IP(dst=target) / TCP(dport=port, flags="F"), timeout=1, verbose=False)
-                    for response in responses:
-                        if i == 1:
-                            self.open_ports[target] = self.open_ports.get(target, []).append(port)
-                            logger.info(f"{target}:{port} is open")
-                    if i != 1 and responses:
-                        break
+                self.exotic_scan(target, [port], mode="f")
             case _:
                 print(f"Invalid scan type: {scan_type}")
                 exit(1)
 
+    def tcp_scan(self, target: str | list, ports_range: range | list):
+        ans, _ = sr(
+            IP(dst=target) / TCP(sport=RandShort(), dport=ports_range, flags="S"),
+            timeout=1,
+            verbose=False,
+            inter=self.delay,
+        )
+        for sent, received in ans:
+            port = sent.dport
+            if received.haslayer(TCP) and received[TCP].flags == 0x12:
+                logger.success(f"{port} is open")
+                self.open_ports[sent.dst] = self.open_ports[sent.dst].append(port) if self.open_ports.get(sent.dst) else [port]
+
+                answer = sr1(IP(dst=sent.dst) / TCP(sport=sent.sport, dport=port, flags="A"), timeout=0.5, verbose=False)
+                if answer:
+                    sr1(IP(dst=sent.dst) / TCP(sport=sent.sport, dport=port, flags="R"), timeout=0.5, verbose=False)
+
+
+    def syn_scan(self, target: str | list, ports_range: range | list):
+        ans, _ = sr(
+            IP(dst=target) / TCP(sport=RandShort(), dport=ports_range, flags="S"),
+            timeout=1,
+            verbose=False,
+            inter=self.delay
+        )
+        for sent, recv in ans:
+
+            if recv.haslayer("TCP") and recv["TCP"].flags == 0x12:
+                self.open_ports[sent.dst] = self.open_ports[sent.dst].append(sent.dport) if self.open_ports.get(sent.dst) else [sent.dport]
+                logger.success(f"{sent.dport} is open")
+
+
+    def udp_scan(self, target: str | list, ports_range: range | list):
+        pkts = []
+        payloads = []
+        for port in ports_range:
+            for pl in self.payloads:
+                if pl["ports"] == port:
+                    payloads = pl["payloads"] if port in pl.get(port, []) else []
+            pkts.append(IP(dst=target) / UDP(sport=RandShort(), dport=port) / Raw(load=payloads.pop(0)) if payloads else \
+                        IP(dst=target) / UDP(sport=RandShort(), dport=port))
+        ans, _ = sr(pkts, timeout=1, verbose=False, retry=2, inter=self.delay)
+        for sent, recv in ans:
+            self.open_ports[sent.dst] = self.open_ports[sent.dst].append(sent.dport) if self.open_ports.get(sent.dst) else [sent.dport]
+            logger.success(f"{sent.dport} is open")
+
+    def exotic_scan(self, target: str | list, ports_range: range | list , mode: str ="x"):
+        if mode not in ["x", "f", "n"]:
+            return
+        f = ""
+        match mode:
+            case "x":
+                f = "FPU"
+            case "f":
+                f = "F"
+            case "n":
+                f = ""
+
+        ans, unans = sr(
+            IP(dst=target) / TCP(sport=RandShort(), dport=ports_range, flags=f),
+            timeout=1,
+            verbose=False,
+            retry=2,
+            inter=self.delay,
+        )
+        for sent, received in ans:
+            port = sent.dport
+            if received.haslayer(TCP):
+                tcp_layer = received.getlayer(TCP)
+                if tcp_layer.flags == 0x14:  # RST
+                    logger.info(f"{port} is closed")
+            elif received.haslayer(ICMP):
+                icmp = received.getlayer(ICMP)
+                if icmp.type == 3 and icmp.code in FILTERED_CODES:
+                    logger.info(f"{port} is filtered")
+            else:
+                logger.info(f"{port} status unknown")
+
+        # Ports that didn’t respond are potentially open|filtered
+        for pkt in unans:
+            self.open_ports[pkt.dst] = self.open_ports[pkt.dst].append(pkt.dport) if self.open_ports.get(pkt.dst) else [pkt.dport]
+            logger.success(f"{pkt.dport} is open")
+
+
     def scan(self):
         if self.randomize:
             self.ports = random.sample(list(self.ports), len(self.ports))
+            self.scan_type = random.choice(SCAN_TYPES)
+
         for target in self.targets:
             if isinstance(target, ipaddress.IPv4Network) or isinstance(target, ipaddress.IPv6Network):
                 alive_hosts = host_discovery(target)
-
-                for host in alive_hosts:
-                    logger.info(f"{host} is alive")
-                    logger.info("Starting port scan...")
-                    for port in self.ports:
-                        self._scan_port(str(host), port)
+                if self.mode == "noisy":
+                    match self.scan_type:
+                        case "syn":
+                            self.syn_scan([str(host) for host in alive_hosts], self.ports)
+                        case "tcp":
+                            self.tcp_scan([str(host) for host in alive_hosts], self.ports)
+                        case "udp":
+                            self.udp_scan([str(host) for host in alive_hosts], self.ports)
+                        case "xmas":
+                            self.exotic_scan([str(host) for host in alive_hosts], self.ports, mode="x")
+                        case "fin":
+                            self.exotic_scan([str(host) for host in alive_hosts], self.ports, mode="f")
+                        case "null":
+                            self.exotic_scan([str(host) for host in alive_hosts], self.ports, mode="n")
+                else:
+                    for host in alive_hosts:
+                        logger.info(f"{host} is alive")
+                        logger.info("Starting port scan...")
+                        for port in self.ports:
+                            self._scan_port(str(host), port)
             else:
                 answered, _ = sr(IP(dst=str(target)) / ICMP(), timeout=1, verbose=False)
                 if answered:
@@ -199,6 +266,8 @@ class Scanner:
             logger.info("No open ports found")
 
     def save_scan_params(self, filename: str):
+        self.__dict__.pop("payloads")
+        self.targets = [str(t) for t in self.targets]
         if not filename.endswith(".json"):
             filename += ".json"
         with open(filename, "w") as f:
@@ -240,6 +309,23 @@ def parse_arguments():
         default=conf.iface,
     )
 
+    parser.add_argument(
+        "-m",
+        "--mode",
+        choices=["noisy", "sneaky", "stealth"],
+        type=str,
+        default="noisy",
+        help="Mode to use",
+    )
+
+    parser.add_argument(
+        "-o",
+        "--output",
+        type=str,
+        default="scan_params.json",
+        help="Output json file",
+    )
+
     return parser.parse_args()
 
 
@@ -251,6 +337,8 @@ def main():
     logger.info("Starting scan...")
     scanner = Scanner(args)
     scanner.scan()
+    if args.output:
+        scanner.save_scan_params(args.output)
 
 if __name__ == "__main__":
     main()
