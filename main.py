@@ -100,6 +100,7 @@ class Scanner:
             else:
                 self.ports.add(int(port))
 
+
         self.verbose = params.verbose
         self.randomize = params.randomize
         self.delay = params.delay
@@ -110,9 +111,9 @@ class Scanner:
             case "noisy":
                 self.inter = None
             case "sneaky":
-                self.inter = (1.0, 3.0)
+                self.inter = (0.5, 1.5) # 60 packets per minute -> 3600 packets per hour
             case "stealth":
-                self.inter = (3.0, 10.0)
+                self.inter = (2.0, 4.0) # 20 packets per minute -> 1200 packets per hour
 
         if not self.randomize:
             self.scan_type = params.scan_type
@@ -169,10 +170,10 @@ class Scanner:
             inter=self.delay
         )
         for sent, recv in ans:
-
             if recv.haslayer("TCP") and recv["TCP"].flags == 0x12:
                 self.open_ports[sent.dst] = self.open_ports[sent.dst].append(sent.dport) if self.open_ports.get(sent.dst) else [sent.dport]
-                logger.success(f"{sent.dport} is open")
+                logger.success(f"{sent.dst}:{sent.dport} is open")
+
 
 
     def udp_scan(self, target: str | list, ports_range: range | list):
@@ -187,7 +188,7 @@ class Scanner:
         ans, _ = sr(pkts, timeout=1, verbose=False, retry=2, inter=self.delay)
         for sent, recv in ans:
             self.open_ports[sent.dst] = self.open_ports[sent.dst].append(sent.dport) if self.open_ports.get(sent.dst) else [sent.dport]
-            logger.success(f"{sent.dport} is open")
+            logger.success(f"{sent.dst}:{sent.dport} is open")
 
     def exotic_scan(self, target: str | list, ports_range: range | list , mode: str ="x"):
         if mode not in ["x", "f", "n"]:
@@ -213,18 +214,18 @@ class Scanner:
             if received.haslayer(TCP):
                 tcp_layer = received.getlayer(TCP)
                 if tcp_layer.flags == 0x14:  # RST
-                    logger.info(f"{port} is closed")
+                    logger.info(f"{sent.dst}:{port} is closed")
             elif received.haslayer(ICMP):
                 icmp = received.getlayer(ICMP)
                 if icmp.type == 3 and icmp.code in FILTERED_CODES:
-                    logger.info(f"{port} is filtered")
+                    logger.info(f"{sent.dst}:{port} is filtered")
             else:
-                logger.info(f"{port} status unknown")
+                logger.info(f"{sent.dst}:{port} status unknown")
 
         # Ports that didn’t respond are potentially open|filtered
         for pkt in unans:
             self.open_ports[pkt.dst] = self.open_ports[pkt.dst].append(pkt.dport) if self.open_ports.get(pkt.dst) else [pkt.dport]
-            logger.success(f"{pkt.dport} is open")
+            logger.success(f"{pkt.dst}:{pkt.dport} is open")
 
 
     def scan(self):
@@ -238,17 +239,17 @@ class Scanner:
                 if self.mode == "noisy":
                     match self.scan_type:
                         case "syn":
-                            self.syn_scan([str(host) for host in alive_hosts], self.ports)
+                            self.syn_scan([str(host) for host in alive_hosts], list(self.ports))
                         case "tcp":
-                            self.tcp_scan([str(host) for host in alive_hosts], self.ports)
+                            self.tcp_scan([str(host) for host in alive_hosts], list(self.ports))
                         case "udp":
-                            self.udp_scan([str(host) for host in alive_hosts], self.ports)
+                            self.udp_scan([str(host) for host in alive_hosts], list(self.ports))
                         case "xmas":
-                            self.exotic_scan([str(host) for host in alive_hosts], self.ports, mode="x")
+                            self.exotic_scan([str(host) for host in alive_hosts], list(self.ports), mode="x")
                         case "fin":
-                            self.exotic_scan([str(host) for host in alive_hosts], self.ports, mode="f")
+                            self.exotic_scan([str(host) for host in alive_hosts], list(self.ports), mode="f")
                         case "null":
-                            self.exotic_scan([str(host) for host in alive_hosts], self.ports, mode="n")
+                            self.exotic_scan([str(host) for host in alive_hosts], list(self.ports), mode="n")
                 else:
                     for host in alive_hosts:
                         logger.info(f"{host} is alive")
