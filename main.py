@@ -1,9 +1,5 @@
-import argparse
 import codecs
 import ipaddress
-import random
-
-from IPython.terminal.ipapp import flags
 from scapy.all import *
 from scapy.layers.inet import IP, TCP, UDP, ICMP
 import re
@@ -12,7 +8,31 @@ from loguru import logger
 
 SCAN_TYPES = ["tcp", "udp", "syn", "xmas", "ack", "null", "fin"]
 FILTERED_CODES = [1, 2, 3, 9, 10, 13]
+MOST_SCANNED_PORTS = [
+    21, 22, 23, 25, 53, 67, 68, 69, 80, 110,
+    111, 123, 135, 137, 138, 139, 143, 161, 162, 179,
+    389, 443, 445, 465, 514, 515, 520, 554, 587, 593,
+    631, 636, 873, 902, 993, 995, 1025, 1080, 1194, 1234,
+    1433, 1434, 1521, 1723, 1900, 2049, 2082, 2083, 2100, 2222,
+    2375, 2376, 2483, 2484, 25565, 2601, 3128, 3268, 3306, 3389,
+    3478, 3632, 4000, 4444, 4500, 4672, 5000, 5001, 5060, 5061,
+    5432, 5631, 5632, 5900, 5985, 5986, 6000, 6379, 6666, 6667,
+    7001, 7002, 8000, 8008, 8080, 8081, 8443, 8888, 9000, 9090,
+    9200, 9300, 9999, 10000, 11211, 27017
+] + list(range(49152, 49162))
 
+MOST_SCANNED_WELL_KNOWN_PORTS = [
+    1, 7, 9, 13, 17, 19, 20, 21, 22, 23,
+    25, 37, 42, 43, 49, 53, 67, 68, 69, 70,
+    79, 80, 88, 109, 110, 111, 113, 119, 123, 135,
+    137, 138, 139, 143, 161, 162, 179, 194, 389, 427,
+    443, 445, 464, 465, 512, 513, 514, 515, 520, 524,
+    540, 548, 554, 587, 593, 631, 636, 873, 990, 992,
+    993, 995, 102, 108, 135, 144, 179, 254, 255, 260,
+    264, 318, 383, 512, 513, 514, 515, 520, 524, 530,
+    543, 544, 548, 554, 587, 593, 631, 636, 749, 765,
+    873, 992, 993, 995, 999, 1010, 1023
+]
 
 def get_payloads():
     entries = []
@@ -153,13 +173,12 @@ class Scanner:
         )
         for sent, received in ans:
             port = sent.dport
-            if received.haslayer(TCP) and received[TCP].flags == 0x12:
+            if received.haslayer(TCP) and received[TCP].flags == 0x12: # SYN-ACK
                 logger.success(f"{port} is open")
                 self.open_ports[sent.dst] = self.open_ports[sent.dst].append(port) if self.open_ports.get(sent.dst) else [port]
 
-                answer = sr1(IP(dst=sent.dst) / TCP(sport=sent.sport, dport=port, flags="A"), timeout=0.5, verbose=False)
-                if answer:
-                    sr1(IP(dst=sent.dst) / TCP(sport=sent.sport, dport=port, flags="R"), timeout=0.5, verbose=False)
+                sr1(IP(dst=sent.dst) / TCP(sport=sent.sport, dport=port, flags="A"), timeout=0.5, verbose=False)
+                sr1(IP(dst=sent.dst) / TCP(sport=sent.sport, dport=port, flags="R"), timeout=0.5, verbose=False)
 
 
     def syn_scan(self, target: str | list, ports_range: range | list):
@@ -170,7 +189,7 @@ class Scanner:
             inter=self.delay
         )
         for sent, recv in ans:
-            if recv.haslayer("TCP") and recv["TCP"].flags == 0x12:
+            if recv.haslayer("TCP") and recv["TCP"].flags == 0x12: # SYN-ACK
                 self.open_ports[sent.dst] = self.open_ports[sent.dst].append(sent.dport) if self.open_ports.get(sent.dst) else [sent.dport]
                 logger.success(f"{sent.dst}:{sent.dport} is open")
 
@@ -185,10 +204,19 @@ class Scanner:
                     payloads = pl["payloads"] if port in pl.get(port, []) else []
             pkts.append(IP(dst=target) / UDP(sport=RandShort(), dport=port) / Raw(load=payloads.pop(0)) if payloads else \
                         IP(dst=target) / UDP(sport=RandShort(), dport=port))
-        ans, _ = sr(pkts, timeout=1, verbose=False, retry=2, inter=self.delay)
+        ans, unans = sr(pkts, timeout=1, verbose=False, retry=2, inter=self.delay)
         for sent, recv in ans:
-            self.open_ports[sent.dst] = self.open_ports[sent.dst].append(sent.dport) if self.open_ports.get(sent.dst) else [sent.dport]
-            logger.success(f"{sent.dst}:{sent.dport} is open")
+            if recv.haslayer("UDP"):
+                self.open_ports[sent.dst] = self.open_ports[sent.dst].append(sent.dport) if self.open_ports.get(sent.dst) else [sent.dport]
+                logger.success(f"{sent.dst}:{sent.dport} is open")
+            elif recv.haslayer("ICMP") and recv["ICMP"].type == 3 and recv["ICMP"].code == 3:
+                logger.info(f"{sent.dst}:{sent.dport} is closed")
+            elif recv.haslayer("ICMP") and recv["ICMP"].type == 3 and recv["ICMP"].code in FILTERED_CODES:
+                logger.warning(f"{sent.dst}:{sent.dport} is filtered")
+
+        for u in unans:
+            self.open_ports[u.dst] = self.open_ports[u.dport].append(u.dport) if self.open_ports.get(u.dst) else [u.dport]
+            logger.warning(f"{u.dst}:{u.dport} is open or filtered")
 
     def exotic_scan(self, target: str | list, ports_range: range | list , mode: str ="x"):
         if mode not in ["x", "f", "n"]:
@@ -269,8 +297,7 @@ class Scanner:
     def save_scan_params(self, filename: str):
         self.__dict__.pop("payloads")
         self.targets = [str(t) for t in self.targets]
-        if not filename.endswith(".json"):
-            filename += ".json"
+        filename += ".json" if not filename.endswith(".json") else ""
         with open(filename, "w") as f:
             json.dump(self.__dict__, f, indent=4, default=str)
 
