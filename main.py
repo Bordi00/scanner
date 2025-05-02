@@ -112,10 +112,11 @@ class Scanner:
     def __init__(self, params):
         conf.iface = params.interface
         ips = get_windows_ip().split("\r\n")
+        self.duration = 0
         self.ip = ""
         for ip in ips:
             self.ip = ip if ip.startswith("172.25.") else self.ip
-        self.started = datetime.now()
+        self.started = 0
         targets = params.target.split(",")
         self.targets = set()
         for target in targets:
@@ -290,7 +291,7 @@ class Scanner:
         if self.randomize:
             self.ports = random.sample(list(self.ports), len(self.ports))
             self.scan_type = random.choice(SCAN_TYPES)
-
+        self.started = datetime.now()
         for target in self.targets:
             if isinstance(target, ipaddress.IPv4Network) or isinstance(target, ipaddress.IPv6Network):
                 alive_hosts = host_discovery(target)
@@ -342,6 +343,8 @@ class Scanner:
                             self._scan_port(str(target), port)
         if not self.open_ports:
             logger.info("No open ports found")
+
+        self.duration = datetime.now() - self.started
 
     def save_scan_params(self, filename: str):
         self.__dict__.pop("payloads")
