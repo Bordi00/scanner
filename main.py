@@ -8,7 +8,7 @@ import json
 from loguru import logger
 from datetime import datetime
 import sys
-
+from tqdm import tqdm
 
 SCAN_TYPES = ["tcp", "udp", "syn", "xmas", "ack", "null", "fin"]
 FILTERED_CODES = [1, 2, 3, 9, 10, 13]
@@ -110,6 +110,7 @@ def host_discovery(network: ipaddress.IPv4Network | ipaddress.IPv6Network) -> li
 
 class Scanner:
     def __init__(self, params):
+        self.verbose = params.verbose
         conf.iface = params.interface
         ips = get_windows_ip().split("\r\n")
         self.duration = 0
@@ -152,9 +153,9 @@ class Scanner:
             case "noisy":
                 self.inter = None
             case "sneaky":
-                self.inter = (0.5, 1.5) # 60 packets per minute -> 3600 packets per hour
+                self.inter = (0.1, 0.16) # 7*60 packets per minute -> 3600 packets per hour
             case "stealth":
-                self.inter = (2.0, 4.0) # 20 packets per minute -> 1200 packets per hour
+                self.inter = (0.5, 1.5) # 20 packets per minute -> 1200 packets per hour
 
         if not self.randomize:
             self.scan_type = params.scan_type
@@ -310,7 +311,7 @@ class Scanner:
                         case "null":
                             self.exotic_scan([str(host) for host in alive_hosts], list(self.ports), mode="n")
                 else:
-                    for host in alive_hosts:
+                    for host in alive_hosts if self.verbose else tqdm(alive_hosts):
                         logger.info(f"{host} is alive")
                         logger.info("Starting port scan...")
                         ports = self.ports if isinstance(self.ports, list) else list(self.ports)
@@ -339,7 +340,7 @@ class Scanner:
                     else:
                         ports = self.ports if isinstance(self.ports, list) else list(self.ports)
                         ports = [ports[i:i+10] for i in range(0, len(self.ports), 10)]
-                        for port in ports:
+                        for port in ports if self.verbose else tqdm(ports):
                             self._scan_port(str(target), port)
         if not self.open_ports:
             logger.info("No open ports found")
@@ -417,11 +418,11 @@ def main():
         logger.add(lambda msg: print(msg, end=""), level="DEBUG", format="<lvl>{message}</lvl>", colorize=True)
     logger.info("Starting scan...")
     scanner = Scanner(args)
+    if args.output:
+        scanner.save_scan_params(args.output)
     scanner.scan()
     if args.output:
         scanner.save_scan_params(args.output)
-
-    # TODO: creare lista di pacchetti quando randomize è true e inviarli tutti contemporaneamente, per sapere se sono open o no usare il sent from answer
 
 if __name__ == "__main__":
     main()
