@@ -116,8 +116,9 @@ class Scanner:
         self.duration = 0
         self.ip = ""
         for ip in ips:
-            self.ip = ip if ip.startswith("172.25.") else self.ip
-        self.started = 0
+            self.ip = ip if self.ip == "" and ip.startswith("172.25.") else self.ip
+        self.start = datetime.now()
+        self.end = 0
         targets = params.target.split(",")
         self.targets = set()
         for target in targets:
@@ -134,20 +135,22 @@ class Scanner:
                     print(f"Invalid IP address: {params.target}")
                     exit(1)
 
-        self.ports = set()
-        for port in params.port.split(","):
-            if "-" in port:
-                start_port, end_port = port.split("-")
-                self.ports.update(range(int(start_port), int(end_port) + 1))
-            else:
-                self.ports.add(int(port))
+        if "MSWKP" in params.port:
+            self.ports = MOST_SCANNED_WELL_KNOWN_PORTS
+        else:
+            self.ports = set()
+            for port in params.port.split(","):
+                if "-" in port:
+                    start_port, end_port = port.split("-")
+                    self.ports.update(range(int(start_port), int(end_port) + 1))
+                else:
+                    self.ports.add(int(port))
 
 
         self.verbose = params.verbose
         self.randomize = params.randomize
         self.delay = params.delay
         self.open_ports = {}
-        self.payloads = get_payloads()
         self.mode = params.mode
         match self.mode:
             case "noisy":
@@ -226,7 +229,7 @@ class Scanner:
         payloads = []
         logger.info(f"UDP scan on {target}")
         for port in ports_range:
-            for pl in self.payloads:
+            for pl in get_payloads():
                 if pl["ports"] == port:
                     payloads = pl["payloads"] if port in pl.get(port, []) else []
 
@@ -292,14 +295,15 @@ class Scanner:
         if self.randomize:
             self.ports = random.sample(list(self.ports), len(self.ports))
             self.scan_type = random.choice(SCAN_TYPES)
-        self.started = datetime.now()
+
         for target in self.targets:
             if isinstance(target, ipaddress.IPv4Network) or isinstance(target, ipaddress.IPv6Network):
                 alive_hosts = host_discovery(target)
+                logger.info(f"{len(alive_hosts)} hosts found alive")
                 if self.mode == "noisy":
                     match self.scan_type:
                         case "syn":
-                            self.syn_scan([str(host) for host in alive_hosts], list(self.ports))
+                            self.syn_scan(target=[str(host) for host in alive_hosts], ports_range=list(self.ports))
                         case "tcp":
                             self.tcp_scan([str(host) for host in alive_hosts], list(self.ports))
                         case "udp":
@@ -344,16 +348,43 @@ class Scanner:
                             self._scan_port(str(target), port)
         if not self.open_ports:
             logger.info("No open ports found")
+        try:
+            self.end = datetime.now()
+            self.duration = self.end - self.start
+        except:
+            self.duration = datetime.now() - datetime.strptime(self.start, "%Y-%m-%d %H:%M:%S.%f")
 
-        self.duration = datetime.now() - self.started
+    def save_scan_params(self, filename: str, update: bool = False):
 
-    def save_scan_params(self, filename: str):
-        self.__dict__.pop("payloads")
-        self.targets = [str(t) for t in self.targets]
+
         filename += ".json" if not filename.endswith(".json") else ""
 
+        # Load existing data if valid
+        if os.path.exists(filename) and os.path.getsize(filename) > 0:
+            try:
+                with open(filename, "r") as f:
+                    file_data = json.load(f)
+                    file_data = list(file_data) if not isinstance(file_data, list) else file_data
+
+            except (json.JSONDecodeError, FileNotFoundError):
+                file_data = []
+        else:
+            file_data = []
+
+        if not update:
+            data = {}
+            data["ip"] = self.ip
+            data["start"] = str(self.start)
+            data["random"] = self.randomize
+            data["mode"] = self.mode
+            file_data.append(data)
+        else:
+            file_data[-1]["end"] = str(self.end)
+            file_data[-1]["duration"] = str(self.duration)
+
+        # Overwrite with the updated list
         with open(filename, "w") as f:
-            json.dump(self.__dict__, f, indent=4, default=str)
+            json.dump(file_data, f, indent=4)
 
 
 def parse_arguments():
@@ -404,7 +435,6 @@ def parse_arguments():
         "-o",
         "--output",
         type=str,
-        default="scan_params.json",
         help="Output json file",
     )
 
@@ -419,10 +449,10 @@ def main():
     logger.info("Starting scan...")
     scanner = Scanner(args)
     if args.output:
-        scanner.save_scan_params(args.output)
+        scanner.save_scan_params(args.output, update=False)
     scanner.scan()
     if args.output:
-        scanner.save_scan_params(args.output)
+        scanner.save_scan_params(args.output, update=True)
 
 if __name__ == "__main__":
     main()
