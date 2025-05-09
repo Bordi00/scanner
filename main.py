@@ -10,7 +10,7 @@ from datetime import datetime
 import sys
 from tqdm import tqdm
 
-SCAN_TYPES = ["tcp", "udp", "syn", "xmas", "ack", "null", "fin"]
+SCAN_TYPES = ["tcp", "udp", "syn", "xmas", "null", "fin"]
 FILTERED_CODES = [1, 2, 3, 9, 10, 13]
 MOST_SCANNED_PORTS = [
     21, 22, 23, 25, 53, 67, 68, 69, 80, 110,
@@ -156,9 +156,9 @@ class Scanner:
             case "noisy":
                 self.inter = None
             case "sneaky":
-                self.inter = (0.1, 0.16) # 7*60 packets per minute -> 3600 packets per hour
+                self.inter = (0.1, 0.16) # 420 packets per minute -> 25200 packets per hour
             case "stealth":
-                self.inter = (0.5, 1.5) # 20 packets per minute -> 1200 packets per hour
+                self.inter = (0.5, 1.5) # 60 packets per minute -> 3600 packets per hour
 
         if not self.randomize:
             self.scan_type = params.scan_type
@@ -177,10 +177,6 @@ class Scanner:
                 self.syn_scan(target, [port] if isinstance(port, int) else port)
             case "xmas":
                 self.exotic_scan(target, [port] if isinstance(port, int) else port, mode="x")
-            case "ack":
-                # TODO: implement the logic for ACK scan
-                # response = sr(IP(dst=target) / TCP(dport=port, flags="A"), timeout=1, verbose=False)
-                pass
             case "null":
                 self.exotic_scan(target, [port] if isinstance(port, int) else port, mode="n")
             case "fin":
@@ -352,11 +348,10 @@ class Scanner:
             self.end = datetime.now()
             self.duration = self.end - self.start
         except:
-            self.duration = datetime.now() - datetime.strptime(self.start, "%Y-%m-%d %H:%M:%S.%f")
+            self.end = datetime.now()
+            self.duration = self.end - datetime.strptime(self.start, "%Y-%m-%d %H:%M:%S.%f")
 
     def save_scan_params(self, filename: str, update: bool = False):
-
-
         filename += ".json" if not filename.endswith(".json") else ""
 
         # Load existing data if valid
@@ -438,6 +433,14 @@ def parse_arguments():
         help="Output json file",
     )
 
+    parser.add_argument(
+        "-I",
+        "--iterations",
+        type=int,
+        help="Number of iterations to perform",
+        default=1,
+    )
+
     return parser.parse_args()
 
 
@@ -446,13 +449,25 @@ def main():
     logger.remove(0)
     if args.verbose:
         logger.add(lambda msg: print(msg, end=""), level="DEBUG", format="<lvl>{message}</lvl>", colorize=True)
-    logger.info("Starting scan...")
-    scanner = Scanner(args)
-    if args.output:
-        scanner.save_scan_params(args.output, update=False)
-    scanner.scan()
-    if args.output:
-        scanner.save_scan_params(args.output, update=True)
+
+    mode = args.mode
+    for i in range(args.iterations):
+
+        if i != 0:
+            logger.info("Waiting for 1h..." % args.delay)
+            time.sleep(3600)
+            args.mode = "sneaky" if mode == "stealth" else "sneaky"
+            mode = args.mode
+
+        logger.info("Starting scan...")
+        scanner = Scanner(args)
+        if args.output:
+            scanner.save_scan_params(args.output, update=False)
+        scanner.scan()
+        if args.output:
+            scanner.save_scan_params(args.output, update=True)
+        logger.info("Scan completed")
+
 
 if __name__ == "__main__":
     main()
