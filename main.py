@@ -454,9 +454,13 @@ def main():
     for i in range(args.iterations):
 
         if i != 0:
-            logger.info("Waiting for 1h..." % args.delay)
+            logger.info("Waiting for 1h...")
             time.sleep(3600)
-            args.mode = "sneaky" if mode == "stealth" else "sneaky"
+
+            if mode == "sneaky":
+                args.mode = "stealth"
+            elif mode == "stealth":
+                args.mode = "sneaky"
             mode = args.mode
 
         logger.info("Starting scan...")
